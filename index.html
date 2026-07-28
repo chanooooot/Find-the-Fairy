@@ -91,6 +91,12 @@ const CONFIG = {
   edgeGlowMaxOpacity: 0.35,
   audioShimmerEnabled: true,
 
+  // --- M2: brightness spawning ---
+  calibrationSeconds: 2,
+  luminanceGridCols: 8,
+  luminanceGridRows: 6,
+  darkRegionPercentile: 30, // spawn in the darkest 30% of sampled regions
+
   // --- Dev only — MUST be removed before shipping (Gate 2 decides the winner) ---
   catchMode: 'dwell',      // 'dwell' | 'tap'
 };
@@ -197,19 +203,77 @@ let fairies = [];
 let caughtCount = 0;
 let roundStartTime = 0;
 let dwellProgress = 0;
+let gameState = 'calibrating'; // 'calibrating' | 'playing'
+let calibrationSamples = [];
+let calibrationStartTime = 0;
+let lumCanvas, lumCtx;
 
 function startRound() {
   zeroed = false;
   fairies = [];
-  for (let i = 0; i < CONFIG.fairyCount; i++) {
-    fairies.push({
-      yaw: Math.random() * 360,
-      pitch: (Math.random() * 2 - 1) * CONFIG.spawnPitchRange,
-      caught: false,
-    });
-  }
   caughtCount = 0;
   dwellProgress = 0;
+  calibrationSamples = [];
+  calibrationStartTime = performance.now();
+  gameState = 'calibrating';
+}
+
+// Sample the video frame's luminance grid, tag each cell with the world
+// bearing it corresponds to (screen offset + current yaw/pitch), and
+// accumulate into calibrationSamples for pickSpawnBearings() to draw from.
+function sampleLuminance() {
+  if (video.readyState < 2) return;
+  if (!lumCanvas) {
+    lumCanvas = document.createElement('canvas');
+    lumCanvas.width = CONFIG.luminanceGridCols;
+    lumCanvas.height = CONFIG.luminanceGridRows;
+    lumCtx = lumCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  lumCtx.drawImage(video, 0, 0, lumCanvas.width, lumCanvas.height);
+  const data = lumCtx.getImageData(0, 0, lumCanvas.width, lumCanvas.height).data;
+  const pixelsPerDegree = canvas.width / CONFIG.cameraFovDegrees;
+
+  for (let row = 0; row < CONFIG.luminanceGridRows; row++) {
+    for (let col = 0; col < CONFIG.luminanceGridCols; col++) {
+      const idx = (row * CONFIG.luminanceGridCols + col) * 4;
+      const lum = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+      const screenX = (col + 0.5) / CONFIG.luminanceGridCols * canvas.width;
+      const screenY = (row + 0.5) / CONFIG.luminanceGridRows * canvas.height;
+      const yawDelta = (screenX - canvas.width / 2) / pixelsPerDegree;
+      const pitchDelta = (screenY - canvas.height / 2) / pixelsPerDegree;
+      calibrationSamples.push({
+        yaw: wrapTo180(currentYaw + yawDelta),
+        pitch: currentPitch + pitchDelta,
+        lum,
+      });
+    }
+  }
+}
+
+// Single function swap (SPEC.md M2): darkest-region bearings instead of
+// Math.random(). Everything downstream (rendering, catching, scoring) is
+// unaware of the change.
+function pickSpawnBearings() {
+  if (calibrationSamples.length === 0) {
+    const bearings = [];
+    for (let i = 0; i < CONFIG.fairyCount; i++) {
+      bearings.push({ yaw: Math.random() * 360, pitch: (Math.random() * 2 - 1) * CONFIG.spawnPitchRange });
+    }
+    return bearings;
+  }
+  const sorted = calibrationSamples.slice().sort((a, b) => a.lum - b.lum);
+  const poolSize = Math.max(1, Math.ceil(sorted.length * CONFIG.darkRegionPercentile / 100));
+  const pool = sorted.slice(0, poolSize);
+  const bearings = [];
+  for (let i = 0; i < CONFIG.fairyCount; i++) {
+    bearings.push(pool[Math.floor(Math.random() * pool.length)]);
+  }
+  return bearings;
+}
+
+function finishCalibration() {
+  fairies = pickSpawnBearings().map(b => ({ yaw: b.yaw, pitch: b.pitch, caught: false }));
+  gameState = 'playing';
   roundStartTime = performance.now();
 }
 
@@ -221,6 +285,7 @@ function catchFairy(f) {
 }
 
 function endRound() {
+  updateAudio(0);
   const elapsedMs = performance.now() - roundStartTime;
   const elapsedS = elapsedMs / 1000;
   const bestKey = 'findFairyBestMs';
@@ -359,47 +424,6 @@ function loop(now) {
   lastFrameTime = now;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  const pixelsPerDegree = canvas.width / CONFIG.cameraFovDegrees;
-
-  let nearestUncaught = null, nearestDist = Infinity;
-  for (const f of fairies) {
-    if (f.caught) continue;
-    const yawDelta = wrapTo180(f.yaw - currentYaw);
-    const pitchDelta = f.pitch - currentPitch;
-    const angularDist = Math.sqrt(yawDelta * yawDelta + pitchDelta * pitchDelta);
-    const opacity = 1 - smoothstep(CONFIG.fadeEndAngle, CONFIG.fadeStartAngle, angularDist);
-
-    if (opacity > 0) {
-      const screenX = canvas.width / 2 + yawDelta * pixelsPerDegree;
-      const screenY = canvas.height / 2 + pitchDelta * pixelsPerDegree;
-      drawFairy(screenX, screenY, opacity, now / 1000);
-    }
-
-    if (angularDist < nearestDist) {
-      nearestDist = angularDist;
-      nearestUncaught = { f, yawDelta, pitchDelta, angularDist };
-    }
-  }
-
-  if (nearestUncaught) {
-    const proximity = 1 - smoothstep(CONFIG.fadeEndAngle, CONFIG.fadeStartAngle, nearestUncaught.angularDist);
-    drawEdgeGlow(nearestUncaught.yawDelta, nearestUncaught.pitchDelta, proximity);
-    updateAudio(proximity);
-
-    if (CONFIG.catchMode === 'dwell') {
-      if (nearestUncaught.angularDist <= CONFIG.catchAngle) {
-        dwellProgress += dt;
-        if (dwellProgress >= CONFIG.dwellDuration) catchFairy(nearestUncaught.f);
-      } else if (CONFIG.dwellDecayOnBreak) {
-        dwellProgress = Math.max(0, dwellProgress - dt * 2);
-      } else {
-        dwellProgress = 0;
-      }
-    }
-  }
-
-  drawReticle();
-
   frameCount++;
   if (now - lastFpsTime > 500) {
     fps = Math.round((frameCount * 1000) / (now - lastFpsTime));
@@ -407,9 +431,66 @@ function loop(now) {
     lastFpsTime = now;
   }
 
-  document.getElementById('debug').textContent =
-    `fps: ${fps}  mode: ${CONFIG.catchMode}\nyaw: ${currentYaw.toFixed(1)}  pitch: ${currentPitch.toFixed(1)}\n` +
-    `caught: ${caughtCount}/${CONFIG.fairyCount}  nearest: ${nearestDist === Infinity ? '-' : nearestDist.toFixed(1)}`;
+  if (gameState === 'calibrating') {
+    sampleLuminance();
+    ctx.save();
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+    ctx.font = '18px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Slowly look around your room…', canvas.width / 2, canvas.height / 2 - 12);
+    ctx.fillText('Finding dark corners…', canvas.width / 2, canvas.height / 2 + 18);
+    ctx.restore();
+
+    document.getElementById('debug').textContent =
+      `fps: ${fps}\ncalibrating: ${((now - calibrationStartTime) / 1000).toFixed(1)}s  samples: ${calibrationSamples.length}`;
+
+    if (now - calibrationStartTime >= CONFIG.calibrationSeconds * 1000) finishCalibration();
+  } else {
+    const pixelsPerDegree = canvas.width / CONFIG.cameraFovDegrees;
+
+    let nearestUncaught = null, nearestDist = Infinity;
+    for (const f of fairies) {
+      if (f.caught) continue;
+      const yawDelta = wrapTo180(f.yaw - currentYaw);
+      const pitchDelta = f.pitch - currentPitch;
+      const angularDist = Math.sqrt(yawDelta * yawDelta + pitchDelta * pitchDelta);
+      const opacity = 1 - smoothstep(CONFIG.fadeEndAngle, CONFIG.fadeStartAngle, angularDist);
+
+      if (opacity > 0) {
+        const screenX = canvas.width / 2 + yawDelta * pixelsPerDegree;
+        const screenY = canvas.height / 2 + pitchDelta * pixelsPerDegree;
+        drawFairy(screenX, screenY, opacity, now / 1000);
+      }
+
+      if (angularDist < nearestDist) {
+        nearestDist = angularDist;
+        nearestUncaught = { f, yawDelta, pitchDelta, angularDist };
+      }
+    }
+
+    if (nearestUncaught) {
+      const proximity = 1 - smoothstep(CONFIG.fadeEndAngle, CONFIG.fadeStartAngle, nearestUncaught.angularDist);
+      drawEdgeGlow(nearestUncaught.yawDelta, nearestUncaught.pitchDelta, proximity);
+      updateAudio(proximity);
+
+      if (CONFIG.catchMode === 'dwell') {
+        if (nearestUncaught.angularDist <= CONFIG.catchAngle) {
+          dwellProgress += dt;
+          if (dwellProgress >= CONFIG.dwellDuration) catchFairy(nearestUncaught.f);
+        } else if (CONFIG.dwellDecayOnBreak) {
+          dwellProgress = Math.max(0, dwellProgress - dt * 2);
+        } else {
+          dwellProgress = 0;
+        }
+      }
+    }
+
+    drawReticle();
+
+    document.getElementById('debug').textContent =
+      `fps: ${fps}  mode: ${CONFIG.catchMode}\nyaw: ${currentYaw.toFixed(1)}  pitch: ${currentPitch.toFixed(1)}\n` +
+      `caught: ${caughtCount}/${CONFIG.fairyCount}  nearest: ${nearestDist === Infinity ? '-' : nearestDist.toFixed(1)}`;
+  }
 
   if (document.getElementById('screen-game').classList.contains('active')) {
     requestAnimationFrame(loop);
