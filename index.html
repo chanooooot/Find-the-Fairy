@@ -247,6 +247,7 @@ function initAudio() {
   osc.frequency.value = 220;
   osc.connect(gainNode).connect(audioCtx.destination);
   osc.start();
+  audioCtx.resume(); // iOS Safari starts AudioContext suspended when created after an await
 }
 
 function updateAudio(proximity) {
@@ -382,8 +383,7 @@ function loop(now) {
 
   if (nearestUncaught) {
     const proximity = 1 - smoothstep(CONFIG.fadeEndAngle, CONFIG.fadeStartAngle, nearestUncaught.angularDist);
-    const glowIntensity = smoothstep(CONFIG.fadeEndAngle, CONFIG.fadeStartAngle, nearestUncaught.angularDist);
-    drawEdgeGlow(nearestUncaught.yawDelta, nearestUncaught.pitchDelta, glowIntensity);
+    drawEdgeGlow(nearestUncaught.yawDelta, nearestUncaught.pitchDelta, proximity);
     updateAudio(proximity);
 
     if (CONFIG.catchMode === 'dwell') {
