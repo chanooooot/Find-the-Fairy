@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Gate 4 — Pinch Spike</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #000;
+    overflow: hidden; font-family: -apple-system, sans-serif; color: #fff; }
+  .screen { position: fixed; inset: 0; display: none; }
+  .screen.active { display: block; }
+  .gate { display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100%; text-align: center; padding: 24px; box-sizing: border-box; }
+  .gate p { font-size: 18px; line-height: 1.4; max-width: 320px; }
+  .gate button { margin-top: 20px; padding: 14px 32px; font-size: 18px; border-radius: 8px;
+    border: none; background: #6a5acd; color: #fff; }
+  #screen-test video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  #screen-test canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #hud { position: absolute; inset: 0; z-index: 10; pointer-events: none;
+    display: flex; flex-direction: column; justify-content: space-between; }
+  #stats { padding: 8px; font: 13px monospace; white-space: pre; background: rgba(0,0,0,0.5);
+    text-shadow: 0 0 2px #000; }
+  #controls { pointer-events: auto; padding: 12px; background: rgba(0,0,0,0.6); }
+  #controls .row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+  #controls button { flex: 1; padding: 12px; font-size: 15px; border-radius: 8px; border: none; }
+  .cond-btn { background: #333; color: #fff; }
+  .cond-btn.active { background: #6a5acd; }
+  .log-btn.hit { background: #2a8a4a; color: #fff; }
+  .log-btn.miss { background: #a83a3a; color: #fff; }
+  #tally { font: 13px monospace; white-space: pre; margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<div id="screen-consent1" class="screen active">
+  <div class="gate">
+    <p>Gate 4 spike — half a day, pass or delete. Not the real game.</p>
+    <button id="btn-motion">Begin</button>
+  </div>
+</div>
+
+<div id="screen-consent2" class="screen">
+  <div class="gate">
+    <p>Rear camera needed for hand tracking.</p>
+    <button id="btn-camera">Continue</button>
+  </div>
+</div>
+
+<div id="screen-error" class="screen">
+  <div class="gate">
+    <p id="error-message"></p>
+    <button id="btn-retry">Try again</button>
+  </div>
+</div>
+
+<div id="screen-test" class="screen">
+  <video id="video" autoplay muted playsinline></video>
+  <canvas id="canvas"></canvas>
+  <div id="hud">
+    <div id="stats"></div>
+    <div id="controls">
+      <div class="row">
+        <button class="cond-btn active" data-cond="bright">Bright</button>
+        <button class="cond-btn" data-cond="normal">Normal</button>
+        <button class="cond-btn" data-cond="dim">Dim</button>
+      </div>
+      <div class="row">
+        <button class="log-btn hit" id="btn-hit">Recognized ✓</button>
+        <button class="log-btn miss" id="btn-miss">Missed ✗</button>
+      </div>
+      <div id="tally"></div>
+    </div>
+  </div>
+</div>
+
+<!-- CDN-loaded, per CLAUDE.md: only dependency ever justified, only for this spike -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+<script>
+const PINCH_THRESHOLD = 0.45; // thumb-index dist / hand-scale dist — tune live if needed
+
+function show(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+}
+
+function showError(message) {
+  document.getElementById('error-message').textContent = message;
+  show('screen-error');
+}
+
+// --- Motion permission (adds sensor load, matching combined game conditions) ---
+function startMotion() {
+  const need = typeof DeviceOrientationEvent !== 'undefined' &&
+    typeof DeviceOrientationEvent.requestPermission === 'function';
+  if (need) {
+    DeviceOrientationEvent.requestPermission().then(state => {
+      if (state === 'granted') {
+        window.addEventListener('deviceorientation', () => {});
+        show('screen-consent2');
+      } else {
+        showError('Motion access denied.');
+      }
+    }).catch(() => showError('Motion access denied.'));
+  } else {
+    window.addEventListener('deviceorientation', () => {});
+    show('screen-consent2');
+  }
+}
+
+// --- Tally state ---
+const tally = { bright: { hit: 0, miss: 0 }, normal: { hit: 0, miss: 0 }, dim: { hit: 0, miss: 0 } };
+let currentCond = 'bright';
+
+document.querySelectorAll('.cond-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.cond-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentCond = btn.dataset.cond;
+    renderTally();
+  });
+});
+
+document.getElementById('btn-hit').addEventListener('click', () => { tally[currentCond].hit++; renderTally(); });
+document.getElementById('btn-miss').addEventListener('click', () => { tally[currentCond].miss++; renderTally(); });
+
+function renderTally() {
+  const lines = ['bright', 'normal', 'dim'].map(c => {
+    const t = tally[c];
+    const total = t.hit + t.miss;
+    const pct = total ? Math.round(100 * t.hit / total) : 0;
+    const bar = c === currentCond ? '> ' : '  ';
+    return `${bar}${c.padEnd(7)} ${t.hit}/${total}  (${pct}%)`;
+  });
+  document.getElementById('tally').textContent = lines.join('\n') +
+    '\n\nPass bar: dim >= 80%, fps >= 18';
+}
+renderTally();
+
+// --- Hand tracking ---
+let video, canvas, ctx;
+let currentlyPinched = false;
+let frameCount = 0, lastFpsTime = performance.now(), fps = 0;
+
+function dist(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y, (a.z || 0) - (b.z || 0));
+}
+
+function onResults(results) {
+  ctx.save();
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  currentlyPinched = false;
+  if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+    const lm = results.multiHandLandmarks[0];
+    drawConnectors(ctx, lm, HAND_CONNECTIONS, { color: '#6a5acd', lineWidth: 3 });
+    drawLandmarks(ctx, lm, { color: '#fff', radius: 3 });
+
+    const pinchDist = dist(lm[4], lm[8]);
+    const handScale = dist(lm[0], lm[9]) || 1;
+    currentlyPinched = (pinchDist / handScale) < PINCH_THRESHOLD;
+  }
+
+  if (currentlyPinched) {
+    ctx.font = 'bold 40px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#4aff88';
+    ctx.fillText('PINCH', canvas.width / 2, 60);
+  }
+  ctx.restore();
+
+  frameCount++;
+  const now = performance.now();
+  if (now - lastFpsTime > 500) {
+    fps = Math.round((frameCount * 1000) / (now - lastFpsTime));
+    frameCount = 0;
+    lastFpsTime = now;
+  }
+  document.getElementById('stats').textContent =
+    `fps: ${fps}   pinch: ${currentlyPinched ? 'YES' : 'no'}   condition: ${currentCond}`;
+}
+
+function startCamera() {
+  if (typeof Hands === 'undefined' || typeof Camera === 'undefined') {
+    showError('MediaPipe Hands failed to load on this browser. That is a Gate 4 data point, not a bug — note it and stop.');
+    return;
+  }
+
+  video = document.getElementById('video');
+  canvas = document.getElementById('canvas');
+  ctx = canvas.getContext('2d');
+
+  try {
+    const hands = new Hands({ locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
+    hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+    hands.onResults(onResults);
+
+    const camera = new Camera(video, {
+      onFrame: async () => { await hands.send({ image: video }); },
+      facingMode: 'environment',
+      width: 640,
+      height: 480,
+    });
+
+    function resize() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    camera.start()
+      .then(() => show('screen-test'))
+      .catch(err => showError('Camera/hand-tracking failed to start: ' + err.message));
+  } catch (err) {
+    showError('MediaPipe Hands threw on init: ' + err.message);
+  }
+}
+
+document.getElementById('btn-motion').addEventListener('click', startMotion);
+document.getElementById('btn-camera').addEventListener('click', startCamera);
+document.getElementById('btn-retry').addEventListener('click', () => show('screen-consent1'));
+</script>
+</body>
+</html>
