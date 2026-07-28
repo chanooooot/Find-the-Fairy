@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Find Fairy</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #000;
+    overflow: hidden; font-family: -apple-system, sans-serif; }
+  .screen { position: fixed; inset: 0; display: none; }
+  .screen.active { display: block; }
+  .gate { display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100%; color: #fff; text-align: center; padding: 24px; box-sizing: border-box; }
+  .gate p { font-size: 20px; line-height: 1.4; max-width: 320px; }
+  .gate button { margin-top: 24px; padding: 14px 32px; font-size: 18px; border-radius: 8px;
+    border: none; background: #6a5acd; color: #fff; }
+  #screen-game video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  #screen-game canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #debug { position: absolute; top: 8px; left: 8px; color: #0f0; font: 12px monospace;
+    white-space: pre; z-index: 10; text-shadow: 0 0 2px #000; }
+  .hint { font-size: 14px; opacity: 0.7; margin-top: 12px; }
+</style>
+</head>
+<body>
+
+<div id="screen-consent1" class="screen active">
+  <div class="gate">
+    <p>Fairies hide in your room — let's find them.</p>
+    <button id="btn-motion">Begin</button>
+  </div>
+</div>
+
+<div id="screen-consent2" class="screen">
+  <div class="gate">
+    <p>Open your eyes.</p>
+    <button id="btn-camera">Continue</button>
+  </div>
+</div>
+
+<div id="screen-error" class="screen">
+  <div class="gate">
+    <p id="error-message"></p>
+    <p id="error-hint" class="hint"></p>
+    <button id="btn-retry">Try again</button>
+  </div>
+</div>
+
+<div id="screen-game" class="screen">
+  <video id="camera" autoplay muted playsinline></video>
+  <canvas id="canvas"></canvas>
+  <div id="debug"></div>
+</div>
+
+<script>
+const CONFIG = {
+  fadeStartAngle: 30,   // beyond this: fully invisible
+  fadeEndAngle: 12,     // within this: fully solid
+  cameraFovDegrees: 52, // assumed horizontal FOV, portrait rear camera
+  // alpha/beta sign conventions differ iOS vs Android (SPEC.md §6) — flip
+  // whichever axis moves the wrong way when you turn toward the fairy.
+  invertYaw: false,
+  invertPitch: false,
+};
+
+// Gate 1: single fairy at a fixed bearing relative to round start.
+const fairy = { yaw: 40, pitch: 10 };
+
+function show(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+}
+
+function showError(message, hint) {
+  document.getElementById('error-message').textContent = message;
+  document.getElementById('error-hint').textContent = hint;
+  show('screen-error');
+}
+
+function wrapTo180(deg) {
+  let d = deg % 360;
+  if (d > 180) d -= 360;
+  if (d < -180) d += 360;
+  return d;
+}
+
+// --- Orientation ---
+let zeroed = false;
+let alpha0 = 0, beta0 = 0;
+let currentYaw = 0, currentPitch = 0;
+let gotOrientationEvent = false;
+
+function onOrientation(e) {
+  if (e.alpha == null || e.beta == null) return;
+  gotOrientationEvent = true;
+  if (!zeroed) {
+    alpha0 = e.alpha;
+    beta0 = e.beta;
+    zeroed = true;
+  }
+  currentYaw = wrapTo180(e.alpha - alpha0) * (CONFIG.invertYaw ? -1 : 1);
+  currentPitch = (e.beta - beta0) * (CONFIG.invertPitch ? -1 : 1);
+}
+
+function startMotion() {
+  const need = typeof DeviceOrientationEvent !== 'undefined' &&
+    typeof DeviceOrientationEvent.requestPermission === 'function';
+  if (need) {
+    DeviceOrientationEvent.requestPermission().then(state => {
+      if (state === 'granted') {
+        window.addEventListener('deviceorientation', onOrientation);
+        show('screen-consent2');
+      } else {
+        showError('Motion access denied.', 'iOS: Settings > Safari > Motion & Orientation Access.');
+      }
+    }).catch(() => showError('Motion access denied.', 'iOS: Settings > Safari > Motion & Orientation Access.'));
+  } else if (window.DeviceOrientationEvent) {
+    window.addEventListener('deviceorientation', onOrientation);
+    show('screen-consent2');
+  } else {
+    showError('Find Fairy needs a phone with motion sensors.', 'Open this link on your phone.');
+  }
+}
+
+// --- Camera ---
+let video, canvas, ctx;
+
+function startCamera() {
+  navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+    .then(stream => {
+      video = document.getElementById('camera');
+      video.srcObject = stream;
+      canvas = document.getElementById('canvas');
+      ctx = canvas.getContext('2d');
+      resizeCanvas();
+      window.addEventListener('resize', resizeCanvas);
+      show('screen-game');
+      // guard: no phone with working gyro ever sent an orientation event
+      setTimeout(() => {
+        if (!gotOrientationEvent) {
+          showError('Find Fairy needs a phone with motion sensors.', 'Open this link on your phone.');
+        }
+      }, 1500);
+      requestAnimationFrame(loop);
+    })
+    .catch(() => {
+      showError('Camera access denied.', 'Android: site settings > Permissions > Camera.');
+    });
+}
+
+function resizeCanvas() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+
+// --- Fairy rendering ---
+function smoothstep(edge0, edge1, x) {
+  const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+
+function drawFairy(x, y, opacity, t) {
+  if (opacity <= 0) return;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = opacity;
+
+  const coreRadius = 18;
+  const grad = ctx.createRadialGradient(x, y, 0, x, y, coreRadius * 3);
+  grad.addColorStop(0, 'rgba(255, 240, 180, 1)');
+  grad.addColorStop(0.4, 'rgba(255, 200, 100, 0.6)');
+  grad.addColorStop(1, 'rgba(255, 200, 100, 0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(x, y, coreRadius * 3, 0, Math.PI * 2);
+  ctx.fill();
+
+  const particleCount = 8;
+  const orbitRadius = coreRadius * 1.8;
+  for (let i = 0; i < particleCount; i++) {
+    const angle = t * 2 + (i / particleCount) * Math.PI * 2;
+    const px = x + Math.cos(angle) * orbitRadius;
+    const py = y + Math.sin(angle) * orbitRadius;
+    ctx.beginPath();
+    ctx.fillStyle = 'rgba(255, 250, 220, 0.9)';
+    ctx.arc(px, py, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+let frameCount = 0, lastFpsTime = performance.now(), fps = 0;
+
+function loop(now) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const pixelsPerDegree = canvas.width / CONFIG.cameraFovDegrees;
+  const yawDelta = wrapTo180(fairy.yaw - currentYaw);
+  const pitchDelta = fairy.pitch - currentPitch;
+  const angularDist = Math.sqrt(yawDelta * yawDelta + pitchDelta * pitchDelta);
+  const opacity = 1 - smoothstep(CONFIG.fadeEndAngle, CONFIG.fadeStartAngle, angularDist);
+
+  const screenX = canvas.width / 2 + yawDelta * pixelsPerDegree;
+  const screenY = canvas.height / 2 + pitchDelta * pixelsPerDegree;
+
+  drawFairy(screenX, screenY, opacity, now / 1000);
+
+  frameCount++;
+  if (now - lastFpsTime > 500) {
+    fps = Math.round((frameCount * 1000) / (now - lastFpsTime));
+    frameCount = 0;
+    lastFpsTime = now;
+  }
+
+  document.getElementById('debug').textContent =
+    `fps: ${fps}\nyaw: ${currentYaw.toFixed(1)}  pitch: ${currentPitch.toFixed(1)}\n` +
+    `fairy delta: ${yawDelta.toFixed(1)}, ${pitchDelta.toFixed(1)}\nangularDist: ${angularDist.toFixed(1)}`;
+
+  requestAnimationFrame(loop);
+}
+
+document.getElementById('btn-motion').addEventListener('click', startMotion);
+document.getElementById('btn-camera').addEventListener('click', startCamera);
+document.getElementById('btn-retry').addEventListener('click', () => {
+  zeroed = false;
+  gotOrientationEvent = false;
+  show('screen-consent1');
+});
+
+if (!window.DeviceOrientationEvent) {
+  showError('Find Fairy needs a phone with motion sensors.', 'Open this link on your phone.');
+}
+</script>
+</body>
+</html>
