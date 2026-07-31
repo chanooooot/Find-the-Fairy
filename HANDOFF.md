@@ -10,6 +10,22 @@ M1 + M2 built and pushed, zero gameplay verified on a real phone. The
 Gate 4 pinch spike is also built and pushed (out of sequence — see
 step 4 below). Gates 1–3 have not run at all.
 
+## Review notes — resolve in gate order
+
+- **Gate 1 needs its specified test build first.** The current page begins
+  M2 calibration, so it cannot provide the required one-fixed-fairy,
+  no-catch/no-guidance sensor-feasibility result. Restore that minimal mode,
+  run Gate 1 on iPhone and Android, and record drift° and FPS here before
+  interpreting any later gameplay testing.
+- **Do not change M2 until Gate 2 passes.** When M2 is revisited, sample the
+  same cropped camera view shown by `object-fit: cover` and choose distinct
+  dark-region bearings so all five fairies cannot stack at one location.
+- **Before shipping after Gate 2:** delete the losing catch mode and
+  `?catch=` toggle, remove the debug HUD, and make the non-Web-Share path a
+  clearly labelled Copy link action with a visible failure state.
+- **Gate 4 FPS is preliminary.** The standalone spike measures camera + hand
+  tracking, not the main game's rendering/audio load. Only accept the 18 FPS
+  bar after checking the combined load; a failed spike is deleted, not tuned.
 ## What's in `index.html` (single file, no build step)
 
 - Two-step permission gate (motion, then camera), hard-stop error screen
