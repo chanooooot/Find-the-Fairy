@@ -128,21 +128,42 @@ function smoothstep(edge0, edge1, x) {
 }
 
 // --- Orientation ---
+// Raw alpha/beta/gamma hit a gimbal-lock singularity right at the play pose
+// (phone upright, beta ~90) — alpha and gamma become ambiguous there and
+// alpha can jump ~180 deg with no real motion. Derive yaw/pitch from the
+// device's full look-direction vector instead, which stays continuous
+// through that pose. Pitch is gravity-referenced (no drift, SPEC.md 4.1),
+// so only yaw is zeroed at round start.
 let zeroed = false;
-let alpha0 = 0, beta0 = 0;
+let alpha0 = 0;
 let currentYaw = 0, currentPitch = 0;
 let gotOrientationEvent = false;
 
+// Camera look direction (device -Z axis) in world frame, W3C's
+// Z-X'-Y'' device orientation matrix.
+function lookVector(a, b, g) {
+  const d = Math.PI / 180;
+  const ca = Math.cos(a * d), sa = Math.sin(a * d);
+  const cb = Math.cos(b * d), sb = Math.sin(b * d);
+  const cg = Math.cos(g * d), sg = Math.sin(g * d);
+  return {
+    x: -(ca * sg + sa * sb * cg),
+    y: -(sa * sg - ca * sb * cg),
+    z: -cb * cg,
+  };
+}
+
 function onOrientation(e) {
-  if (e.alpha == null || e.beta == null) return;
+  if (e.alpha == null || e.beta == null || e.gamma == null) return;
   gotOrientationEvent = true;
+  const v = lookVector(e.alpha, e.beta, e.gamma);
+  const heading = Math.atan2(v.x, v.y) * 180 / Math.PI;
   if (!zeroed) {
-    alpha0 = e.alpha;
-    beta0 = e.beta;
+    alpha0 = heading;
     zeroed = true;
   }
-  currentYaw = wrapTo180(e.alpha - alpha0) * (CONFIG.invertYaw ? -1 : 1);
-  currentPitch = (e.beta - beta0) * (CONFIG.invertPitch ? -1 : 1);
+  currentYaw = wrapTo180(heading - alpha0) * (CONFIG.invertYaw ? -1 : 1);
+  currentPitch = Math.asin(Math.max(-1, Math.min(1, v.z))) * 180 / Math.PI * (CONFIG.invertPitch ? -1 : 1);
 }
 
 function startMotion() {
@@ -169,6 +190,16 @@ function startMotion() {
 let video, canvas, ctx;
 
 function startCamera() {
+  if (video) { // Retry after camera already granted once — reuse the stream
+    startRound();
+    show('screen-game');
+    requestAnimationFrame(loop);
+    return;
+  }
+  // Must run synchronously inside the click handler, before the async
+  // getUserMedia call, or iOS Safari denies it the user-gesture context
+  // needed to leave an AudioContext un-suspended.
+  initAudio();
   navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
     .then(stream => {
       video = document.getElementById('camera');
@@ -177,7 +208,6 @@ function startCamera() {
       ctx = canvas.getContext('2d');
       resizeCanvas();
       window.addEventListener('resize', resizeCanvas);
-      initAudio();
       startRound();
       show('screen-game');
       // guard: no phone with working gyro ever sent an orientation event
@@ -304,7 +334,7 @@ function endRound() {
 let audioCtx, osc, gainNode;
 
 function initAudio() {
-  if (!CONFIG.audioShimmerEnabled) return;
+  if (!CONFIG.audioShimmerEnabled || audioCtx) return; // guard: Retry re-enters startCamera()
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   osc = audioCtx.createOscillator();
   gainNode = audioCtx.createGain();
@@ -312,13 +342,14 @@ function initAudio() {
   osc.frequency.value = 220;
   osc.connect(gainNode).connect(audioCtx.destination);
   osc.start();
-  audioCtx.resume(); // iOS Safari starts AudioContext suspended when created after an await
+  audioCtx.resume();
 }
 
 function updateAudio(proximity) {
   if (!CONFIG.audioShimmerEnabled || !gainNode) return;
-  gainNode.gain.value = proximity * 0.05;
-  osc.frequency.value = 220 + proximity * 300;
+  const t = audioCtx.currentTime;
+  gainNode.gain.setTargetAtTime(proximity * 0.05, t, 0.05);
+  osc.frequency.setTargetAtTime(220 + proximity * 300, t, 0.05);
 }
 
 // --- Fairy rendering ---
@@ -458,7 +489,7 @@ function loop(now) {
 
       if (opacity > 0) {
         const screenX = canvas.width / 2 + yawDelta * pixelsPerDegree;
-        const screenY = canvas.height / 2 + pitchDelta * pixelsPerDegree;
+        const screenY = canvas.height / 2 - pitchDelta * pixelsPerDegree;
         drawFairy(screenX, screenY, opacity, now / 1000);
       }
 
