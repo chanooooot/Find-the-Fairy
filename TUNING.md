@@ -18,6 +18,8 @@ tuning becomes miserable and it will not get done properly.
 const CONFIG = {
   // --- Session ---
   fairyCount: 5,
+  spawnPitchRange: 60,     // supported random and brightness-spawn pitch bounds
+  minSpawnSeparation: 25,  // applies to dark samples and random fallback
 
   // --- Visibility / opacity fade (degrees of angular distance) ---
   fadeStartAngle: 30,      // beyond this: fully invisible
@@ -35,6 +37,7 @@ const CONFIG = {
   driftRate: 0,            // degrees/second of fairy bearing drift
 
   // --- Guidance ---
+  guidanceStartAngle: 250, // keeps guidance nonzero across supported bearings
   edgeGlowMaxOpacity: 0.35,
   audioShimmerEnabled: true,
 
@@ -43,6 +46,7 @@ const CONFIG = {
   luminanceGridCols: 8,
   luminanceGridRows: 6,
   darkRegionPercentile: 30,  // spawn in the darkest 30% of sampled regions
+  minCalibrationYawSpread: 120, // circular coverage required to use dark samples
 
   // --- Dev only — MUST be removed before shipping ---
   catchMode: 'dwell',      // 'dwell' | 'tap'
@@ -118,6 +122,25 @@ enough directional information on its own, making edge glow redundant. Two
 guidance systems doing the same job is exactly the sort of redundancy worth
 cutting. Test with `edgeGlowMaxOpacity: 0` before deciding. Do not remove
 the code without running that test.
+
+### `guidanceStartAngle: 250`
+The screen-space distance combines wrapped yaw and pitch deltas. With
+spawn pitch bounded to ±60° and player pitch bounded to ±90°, its maximum
+is approximately 234°. A 250° guidance fade keeps a faint signal even when
+all fairies are behind the player. This is a starting guess: test that
+state with sound off at Gate 2 and tune strength on both phones.
+
+### Spawn bounds and separation
+`spawnPitchRange: 60` applies to both random bearings and accepted dark
+samples. Reject out-of-range samples rather than clamping them, which would
+assign their brightness to a different bearing.
+
+`minSpawnSeparation: 25` prevents overlapping spawns. Select separated dark
+samples, then fill any shortage with separated random bearings.
+
+`minCalibrationYawSpread: 120` measures circular coverage, excluding the
+largest unsampled gap. A narrow scan across ±180° must remain a narrow
+scan. Insufficient coverage falls back to random spawning.
 
 ### `audioShimmerEnabled: true`
 (fact) The iOS physical silent switch mutes Web Audio in Safari. A

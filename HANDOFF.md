@@ -12,14 +12,14 @@ step 4 below). Gates 1–3 have not run at all.
 
 ## Review notes — resolve in gate order
 
-- **Gate 1 needs its specified test build first.** The current page begins
-  M2 calibration, so it cannot provide the required one-fixed-fairy,
-  no-catch/no-guidance sensor-feasibility result. Restore that minimal mode,
-  run Gate 1 on iPhone and Android, and record drift° and FPS here before
-  interpreting any later gameplay testing.
-- **Do not change M2 until Gate 2 passes.** When M2 is revisited, sample the
-  same cropped camera view shown by `object-fit: cover` and choose distinct
-  dark-region bearings so all five fairies cannot stack at one location.
+- **Gate 1 test mode is `?gate1`.** One fixed fairy, no calibration,
+  catches or guidance, including when combined with `?catch=tap`. Run on
+  iPhone and Android and record drift° and FPS before later gameplay tests.
+- **M1 is the default.** Both catch modes use separated random bearings,
+  with no brightness calibration. Test M2 via `?m2` only after Gate 2 passes.
+  Dark samples match the cropped camera view, reject unsupported pitch,
+  and require circular yaw coverage. Insufficient separated dark samples
+  are filled with separated random bearings.
 - **Before shipping after Gate 2:** delete the losing catch mode and
   `?catch=` toggle, remove the debug HUD, and make the non-Web-Share path a
   clearly labelled Copy link action with a visible failure state.
@@ -34,10 +34,11 @@ step 4 below). Gates 1–3 have not run at all.
 - Opacity fade (30°→12°, smoothstep) + edge glow + audio shimmer, both
   driven by nearest uncaught fairy's angular distance
 - Both catch modes, dev toggle via `?catch=dwell` or `?catch=tap` (default dwell)
-- M2: 2s calibration screen ("Slowly look around your room…") samples an
+- M2 (dev opt-in `?m2`): 2s calibration screen ("Slowly look around your room…") samples an
   8×6 luminance grid off the live video each frame, tags each cell with
   the world bearing it was seen at, spawns fairies from the darkest 30%
-  of samples. Falls back to random spawn if no samples collected.
+  of valid samples. Falls back to random spawn if coverage is insufficient;
+  fills shortages with random bearings while preserving separation.
 - find-5, elapsed-time scoring, personal best in `localStorage`, end
   screen with share (Web Share API, clipboard fallback)
 - Debug overlay (top-left, green monospace) — fps, yaw/pitch, angular
@@ -57,7 +58,7 @@ dim-light recognition %.
 ## Step by step — what to do when you resume
 
 ### 1. Gate 1 — sensor feasibility
-Open the live URL on iPhone, grant both permissions. Watch the debug
+Open the deployed URL with `?gate1` on iPhone, grant both permissions. Watch the debug
 overlay's `yaw`/`pitch`. Face a direction, note position, turn 360°
 slowly (~60s), back to start, check drift. Check fps in the corner.
 Repeat on Android.
@@ -83,7 +84,7 @@ back, unprompted.
   `?catch=` URL toggle entirely (both modes must not ship).
 
 ### 3. Gate 3 — dark-corner spawning (only if Gate 2 passed)
-Play a round in: living room daytime, living room lights-off, a second
+After Gate 2 passes, open `?m2`. Play a round in: living room daytime, living room lights-off, a second
 room with different lighting. Pan the phone during the "look around"
 calibration screen each time. Check fairies land in the visibly darker
 bearings.
@@ -109,6 +110,11 @@ tab, 10 attempts each.
 
 Report back after each gate with the actual numbers (drift°, fps,
 catch mode picked, dim%) — that's what decides the next step.
+
+## Local checks
+
+Run `node check.cjs` for syntax and regression checks. These checks use
+synthetic inputs; they do not verify physical-phone gates.
 
 ## Workflow reminder
 

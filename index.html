@@ -70,6 +70,7 @@ const CONFIG = {
   // --- Session ---
   fairyCount: 5,
   spawnPitchRange: 60,     // fairies spawn within +/- this many degrees of pitch
+  minSpawnSeparation: 25,  // min degrees between spawned fairies, including random fallback
 
   // --- Visibility / opacity fade (degrees of angular distance) ---
   fadeStartAngle: 30,      // beyond this: fully invisible
@@ -88,7 +89,7 @@ const CONFIG = {
   invertPitch: false,
 
   // --- Guidance ---
-  guidanceStartAngle: 90,  // edge glow / audio fade in from this far out (wider than visibility fade)
+  guidanceStartAngle: 250, // covers even opposite yaw with extreme pitch; tune on phone
   edgeGlowMaxOpacity: 0.35,
   audioShimmerEnabled: true,
 
@@ -97,7 +98,6 @@ const CONFIG = {
   luminanceGridCols: 8,
   luminanceGridRows: 6,
   darkRegionPercentile: 30, // spawn in the darkest 30% of sampled regions
-  minSpawnSeparation: 25,   // min degrees between spawned fairies (avoids stacking)
   minCalibrationYawSpread: 120, // below this, calibration didn't cover enough to trust — fall back to random
 
   // --- Dev only — MUST be removed before shipping (Gate 2 decides the winner) ---
@@ -111,6 +111,8 @@ if (catchModeParam === 'dwell' || catchModeParam === 'tap') CONFIG.catchMode = c
 // catch/guidance — isolates sensor feel for the drift/fps measurement.
 // Remove once Gate 1 is recorded.
 const gate1Mode = new URLSearchParams(location.search).has('gate1');
+// Dev opt-in only: Gate 2 must pass before testing M2.
+const m2Mode = new URLSearchParams(location.search).has('m2');
 
 function show(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
@@ -257,8 +259,10 @@ function startRound() {
     fairies = [{ yaw: 0, pitch: 0, caught: false }];
     gameState = 'playing';
     roundStartTime = performance.now();
-  } else {
+  } else if (m2Mode) {
     gameState = 'calibrating';
+  } else {
+    finishCalibration(); // No samples: M1 uses random bearings without calibration.
   }
 }
 
@@ -308,10 +312,10 @@ function sampleLuminance() {
   }
 }
 
-function randomBearings() {
-  const bearings = [];
-  for (let i = 0; i < CONFIG.fairyCount; i++) {
-    bearings.push({ yaw: Math.random() * 360, pitch: (Math.random() * 2 - 1) * CONFIG.spawnPitchRange });
+function randomBearings(bearings = []) {
+  while (bearings.length < CONFIG.fairyCount) {
+    const candidate = { yaw: Math.random() * 360, pitch: (Math.random() * 2 - 1) * CONFIG.spawnPitchRange };
+    if (bearings.every(b => bearingDist(b, candidate) >= CONFIG.minSpawnSeparation)) bearings.push(candidate);
   }
   return bearings;
 }
@@ -332,27 +336,24 @@ function pickSpawnBearings() {
   // player barely panned, the "dark corners" pool is really just one
   // narrow cone — spawning all 5 fairies there breaks the full-sphere
   // design (SPEC.md 4.1). Fall back to random spawn instead.
-  const yaws = calibrationSamples.map(s => s.yaw);
-  const yawSpread = Math.max(...yaws) - Math.min(...yaws);
+  const samples = calibrationSamples.filter(s => Math.abs(s.pitch) <= CONFIG.spawnPitchRange);
+  if (samples.length === 0) return randomBearings();
+  const yaws = samples.map(s => s.yaw).sort((a, b) => a - b);
+  // Circular coverage is the full circle minus its largest unsampled gap.
+  let largestGap = yaws[0] + 360 - yaws[yaws.length - 1];
+  for (let i = 1; i < yaws.length; i++) largestGap = Math.max(largestGap, yaws[i] - yaws[i - 1]);
+  const yawSpread = 360 - largestGap;
   if (yawSpread < CONFIG.minCalibrationYawSpread) return randomBearings();
 
-  const sorted = calibrationSamples.slice().sort((a, b) => a.lum - b.lum);
+  const sorted = samples.slice().sort((a, b) => a.lum - b.lum);
   const poolSize = Math.max(1, Math.ceil(sorted.length * CONFIG.darkRegionPercentile / 100));
-  const pool = sorted.slice(0, poolSize);
+  let pool = sorted.slice(0, poolSize);
   const bearings = [];
   for (let i = 0; i < CONFIG.fairyCount; i++) {
-    // Try a handful of random draws from the dark pool for one that's not
-    // stacked on a fairy already placed; give up and accept if the pool's
-    // too small/dark-clustered to satisfy the separation.
-    let pick = pool[Math.floor(Math.random() * pool.length)];
-    for (let attempt = 0; attempt < 10; attempt++) {
-      const candidate = pool[Math.floor(Math.random() * pool.length)];
-      if (bearings.every(b => bearingDist(b, candidate) >= CONFIG.minSpawnSeparation)) {
-        pick = candidate;
-        break;
-      }
-    }
+    if (pool.length === 0) return randomBearings(bearings);
+    const pick = pool[Math.floor(Math.random() * pool.length)];
     bearings.push(pick);
+    pool = pool.filter(candidate => bearingDist(pick, candidate) >= CONFIG.minSpawnSeparation);
   }
   return bearings;
 }
@@ -487,7 +488,7 @@ function drawReticle() {
 // --- Catch input (tap mode) ---
 document.getElementById('canvas') && document.getElementById('canvas').addEventListener('click', onTap);
 function onTap() {
-  if (CONFIG.catchMode !== 'tap') return;
+  if (gate1Mode || gameState !== 'playing' || CONFIG.catchMode !== 'tap') return;
   let nearest = null, nearestDist = Infinity;
   for (const f of fairies) {
     if (f.caught) continue;
