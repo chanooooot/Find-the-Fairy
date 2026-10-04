@@ -15,7 +15,7 @@
   .gate button { margin-top: 24px; padding: 14px 32px; font-size: 18px; border-radius: 8px;
     border: none; background: #6a5acd; color: #fff; }
   #screen-game video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-  #screen-game canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #screen-game canvas { position: absolute; inset: 0; width: 100%; height: 100%; mix-blend-mode: screen; }
   #debug { position: absolute; top: 8px; left: 8px; color: #0f0; font: 12px monospace;
     white-space: pre; z-index: 10; text-shadow: 0 0 2px #000; }
   .hint { font-size: 14px; opacity: 0.7; margin-top: 12px; }
@@ -37,6 +37,7 @@
 <div id="screen-consent2" class="screen">
   <div class="gate">
     <p>Open your eyes.</p>
+    <p id="catch-instructions" class="hint"></p>
     <button id="btn-camera">Continue</button>
   </div>
 </div>
@@ -62,6 +63,7 @@
     <div id="end-best"></div>
     <button id="btn-again">Play again</button>
     <button id="btn-share">Share</button>
+    <p id="share-status" class="hint" aria-live="polite"></p>
   </div>
 </div>
 
@@ -80,6 +82,7 @@ const CONFIG = {
   catchAngle: 8,           // must be within this angle to be catchable
   dwellDuration: 1.2,      // seconds of continuous hold to catch
   dwellDecayOnBreak: true, // true = decay gradually, false = instant reset
+  dwellDecayRate: 2,
 
   // --- Projection ---
   cameraFovDegrees: 52,    // assumed horizontal FOV, portrait rear camera
@@ -92,6 +95,31 @@ const CONFIG = {
   guidanceStartAngle: 250, // covers even opposite yaw with extreme pitch; tune on phone
   edgeGlowMaxOpacity: 0.35,
   audioShimmerEnabled: true,
+  edgeGlowRadiusFraction: 0.45,
+  audioBaseFrequency: 220,
+  audioFrequencyRange: 300,
+  audioMaxGain: 0.05,
+  audioResponseSeconds: 0.05,
+
+  // --- Fairy appearance ---
+  fairy: {
+    coreRadius: 18,
+    glowRadiusScale: 3,
+    glowStops: [[0, 'rgba(255, 240, 180, 1)'],
+      [0.4, 'rgba(255, 200, 100, 0.6)'], [1, 'rgba(255, 200, 100, 0)']],
+    particleCount: 8,
+    orbitRadiusScale: 1.8,
+    orbitSpeed: 2,
+    particleRadius: 2.5,
+    particleColor: 'rgba(255, 250, 220, 0.9)',
+  },
+  reticle: { radius: 10, armOuter: 16, armInner: 6, lineWidth: 2,
+    progressRadius: 20, progressLineWidth: 3 },
+
+  // --- Sensor / frame timing ---
+  sensorTimeoutMs: 1500,
+  maxFrameSeconds: 0.1,
+  fpsSampleMs: 500,
 
   // --- M2: brightness spawning ---
   calibrationSeconds: 2,
@@ -113,6 +141,11 @@ if (catchModeParam === 'dwell' || catchModeParam === 'tap') CONFIG.catchMode = c
 const gate1Mode = new URLSearchParams(location.search).has('gate1');
 // Dev opt-in only: Gate 2 must pass before testing M2.
 const m2Mode = new URLSearchParams(location.search).has('m2');
+document.getElementById('catch-instructions').textContent = gate1Mode
+  ? 'Turn away and back. Check whether the fairy stays in place.'
+  : CONFIG.catchMode === 'tap'
+    ? 'Turn and tilt your phone to find fairies. Aim at one, then tap anywhere to catch it.'
+    : 'Turn and tilt your phone to find fairies. Hold one in the center ring until it fills to catch it.';
 
 function show(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
@@ -201,9 +234,7 @@ let video, canvas, ctx;
 
 function startCamera() {
   if (video) { // Retry after camera already granted once — reuse the stream
-    startRound();
-    show('screen-game');
-    requestAnimationFrame(loop);
+    beginCameraRound();
     return;
   }
   // Must run synchronously inside the click handler, before the async
@@ -218,19 +249,23 @@ function startCamera() {
       ctx = canvas.getContext('2d');
       resizeCanvas();
       window.addEventListener('resize', resizeCanvas);
-      startRound();
-      show('screen-game');
-      // guard: no phone with working gyro ever sent an orientation event
-      setTimeout(() => {
-        if (!gotOrientationEvent) {
-          showError('Find Fairy needs a phone with motion sensors.', 'Open this link on your phone.');
-        }
-      }, 1500);
-      requestAnimationFrame(loop);
+      beginCameraRound();
     })
     .catch(() => {
       showError('Camera access denied.', 'Android: site settings > Permissions > Camera.');
     });
+}
+
+function beginCameraRound() {
+  startRound();
+  show('screen-game');
+  setTimeout(() => {
+    if (!gotOrientationEvent) {
+      updateAudio(0);
+      showError('Find Fairy needs a phone with motion sensors.', 'Open this link on your phone.');
+    }
+  }, CONFIG.sensorTimeoutMs);
+  requestAnimationFrame(loop);
 }
 
 function resizeCanvas() {
@@ -384,6 +419,8 @@ function endRound() {
   document.getElementById('end-time').textContent = elapsedS.toFixed(1) + 's';
   document.getElementById('end-best').textContent =
     'Best: ' + (bestMs / 1000).toFixed(1) + 's' + (isNewBest ? ' (new best!)' : '');
+  document.getElementById('btn-share').textContent = navigator.share ? 'Share' : 'Copy link';
+  document.getElementById('share-status').textContent = '';
   show('screen-end');
 }
 
@@ -396,7 +433,7 @@ function initAudio() {
   osc = audioCtx.createOscillator();
   gainNode = audioCtx.createGain();
   gainNode.gain.value = 0;
-  osc.frequency.value = 220;
+  osc.frequency.value = CONFIG.audioBaseFrequency;
   osc.connect(gainNode).connect(audioCtx.destination);
   osc.start();
   audioCtx.resume();
@@ -405,8 +442,8 @@ function initAudio() {
 function updateAudio(proximity) {
   if (!CONFIG.audioShimmerEnabled || !gainNode) return;
   const t = audioCtx.currentTime;
-  gainNode.gain.setTargetAtTime(proximity * 0.05, t, 0.05);
-  osc.frequency.setTargetAtTime(220 + proximity * 300, t, 0.05);
+  gainNode.gain.setTargetAtTime(proximity * CONFIG.audioMaxGain, t, CONFIG.audioResponseSeconds);
+  osc.frequency.setTargetAtTime(CONFIG.audioBaseFrequency + proximity * CONFIG.audioFrequencyRange, t, CONFIG.audioResponseSeconds);
 }
 
 // --- Fairy rendering ---
@@ -416,25 +453,24 @@ function drawFairy(x, y, opacity, t) {
   ctx.globalCompositeOperation = 'lighter';
   ctx.globalAlpha = opacity;
 
-  const coreRadius = 18;
-  const grad = ctx.createRadialGradient(x, y, 0, x, y, coreRadius * 3);
-  grad.addColorStop(0, 'rgba(255, 240, 180, 1)');
-  grad.addColorStop(0.4, 'rgba(255, 200, 100, 0.6)');
-  grad.addColorStop(1, 'rgba(255, 200, 100, 0)');
+  const style = CONFIG.fairy;
+  const glowRadius = style.coreRadius * style.glowRadiusScale;
+  const grad = ctx.createRadialGradient(x, y, 0, x, y, glowRadius);
+  for (const [offset, color] of style.glowStops) grad.addColorStop(offset, color);
   ctx.fillStyle = grad;
   ctx.beginPath();
-  ctx.arc(x, y, coreRadius * 3, 0, Math.PI * 2);
+  ctx.arc(x, y, glowRadius, 0, Math.PI * 2);
   ctx.fill();
 
-  const particleCount = 8;
-  const orbitRadius = coreRadius * 1.8;
+  const particleCount = style.particleCount;
+  const orbitRadius = style.coreRadius * style.orbitRadiusScale;
   for (let i = 0; i < particleCount; i++) {
-    const angle = t * 2 + (i / particleCount) * Math.PI * 2;
+    const angle = t * style.orbitSpeed + (i / particleCount) * Math.PI * 2;
     const px = x + Math.cos(angle) * orbitRadius;
     const py = y + Math.sin(angle) * orbitRadius;
     ctx.beginPath();
-    ctx.fillStyle = 'rgba(255, 250, 220, 0.9)';
-    ctx.arc(px, py, 2.5, 0, Math.PI * 2);
+    ctx.fillStyle = style.particleColor;
+    ctx.arc(px, py, style.particleRadius, 0, Math.PI * 2);
     ctx.fill();
   }
   ctx.restore();
@@ -445,9 +481,10 @@ function drawEdgeGlow(yawDelta, pitchDelta, intensity) {
   const mag = Math.sqrt(yawDelta * yawDelta + pitchDelta * pitchDelta) || 1;
   const ux = yawDelta / mag, uy = pitchDelta / mag;
   const cx = canvas.width / 2, cy = canvas.height / 2;
-  const edgeDist = Math.min(canvas.width, canvas.height) / 2 * 0.95;
+  if (yawDelta === 0 && pitchDelta === 0) return;
+  const edgeDist = Math.min(cx / Math.abs(ux), cy / Math.abs(uy));
   const gx = cx + ux * edgeDist, gy = cy - uy * edgeDist;
-  const radius = Math.min(canvas.width, canvas.height) * 0.45;
+  const radius = Math.min(canvas.width, canvas.height) * CONFIG.edgeGlowRadiusFraction;
 
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
@@ -463,23 +500,24 @@ function drawReticle() {
   const cx = canvas.width / 2, cy = canvas.height / 2;
   ctx.save();
   ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
-  ctx.lineWidth = 2;
+  const style = CONFIG.reticle;
+  ctx.lineWidth = style.lineWidth;
   ctx.beginPath();
-  ctx.arc(cx, cy, 10, 0, Math.PI * 2);
+  ctx.arc(cx, cy, style.radius, 0, Math.PI * 2);
   ctx.stroke();
   ctx.beginPath();
-  ctx.moveTo(cx - 16, cy); ctx.lineTo(cx - 6, cy);
-  ctx.moveTo(cx + 6, cy); ctx.lineTo(cx + 16, cy);
-  ctx.moveTo(cx, cy - 16); ctx.lineTo(cx, cy - 6);
-  ctx.moveTo(cx, cy + 6); ctx.lineTo(cx, cy + 16);
+  ctx.moveTo(cx - style.armOuter, cy); ctx.lineTo(cx - style.armInner, cy);
+  ctx.moveTo(cx + style.armInner, cy); ctx.lineTo(cx + style.armOuter, cy);
+  ctx.moveTo(cx, cy - style.armOuter); ctx.lineTo(cx, cy - style.armInner);
+  ctx.moveTo(cx, cy + style.armInner); ctx.lineTo(cx, cy + style.armOuter);
   ctx.stroke();
 
   if (CONFIG.catchMode === 'dwell' && dwellProgress > 0) {
     const frac = Math.min(1, dwellProgress / CONFIG.dwellDuration);
     ctx.strokeStyle = 'rgba(255, 220, 140, 0.9)';
-    ctx.lineWidth = 3;
+    ctx.lineWidth = style.progressLineWidth;
     ctx.beginPath();
-    ctx.arc(cx, cy, 20, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
+    ctx.arc(cx, cy, style.progressRadius, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
     ctx.stroke();
   }
   ctx.restore();
@@ -509,12 +547,12 @@ let frameCount = 0, lastFpsTime = performance.now(), fps = 0, lastFrameTime = pe
 let dwellTarget = null; // tracks which fairy dwellProgress belongs to
 
 function loop(now) {
-  const dt = Math.min(0.1, (now - lastFrameTime) / 1000);
+  const dt = Math.min(CONFIG.maxFrameSeconds, (now - lastFrameTime) / 1000);
   lastFrameTime = now;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
   frameCount++;
-  if (now - lastFpsTime > 500) {
+  if (now - lastFpsTime > CONFIG.fpsSampleMs) {
     fps = Math.round((frameCount * 1000) / (now - lastFpsTime));
     frameCount = 0;
     lastFpsTime = now;
@@ -571,7 +609,7 @@ function loop(now) {
           dwellProgress += dt;
           if (dwellProgress >= CONFIG.dwellDuration) catchFairy(nearestUncaught.f);
         } else if (CONFIG.dwellDecayOnBreak) {
-          dwellProgress = Math.max(0, dwellProgress - dt * 2);
+          dwellProgress = Math.max(0, dwellProgress - dt * CONFIG.dwellDecayRate);
         } else {
           dwellProgress = 0;
         }
@@ -598,18 +636,20 @@ document.getElementById('btn-again').addEventListener('click', () => {
   requestAnimationFrame(loop);
 });
 
-document.getElementById('btn-share').addEventListener('click', () => {
+document.getElementById('btn-share').addEventListener('click', async () => {
   const text = document.getElementById('end-time').textContent;
   const shareData = { title: 'Find Fairy', text: `I found 5 fairies in ${text} — `, url: location.href };
+  const status = document.getElementById('share-status');
+  status.textContent = '';
   if (navigator.share) {
     navigator.share(shareData).catch(() => {});
-  } else if (navigator.clipboard) {
-    navigator.clipboard.writeText(location.href).then(() => {
-      const btn = document.getElementById('btn-share');
-      const original = btn.textContent;
-      btn.textContent = 'Copied!';
-      setTimeout(() => { btn.textContent = original; }, 1500);
-    });
+  } else {
+    try {
+      await navigator.clipboard.writeText(location.href);
+      status.textContent = 'Link copied!';
+    } catch {
+      status.textContent = 'Could not copy. Copy this link: ' + location.href;
+    }
   }
 });
 

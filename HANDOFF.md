@@ -21,8 +21,8 @@ step 4 below). Gates 1–3 have not run at all.
   and require circular yaw coverage. Insufficient separated dark samples
   are filled with separated random bearings.
 - **Before shipping after Gate 2:** delete the losing catch mode and
-  `?catch=` toggle, remove the debug HUD, and make the non-Web-Share path a
-  clearly labelled Copy link action with a visible failure state.
+  `?catch=` toggle and remove the debug HUD. The share fallback now says
+  Copy link and reports copy success or failure visibly.
 - **Gate 4 FPS is preliminary.** The standalone spike measures camera + hand
   tracking, not the main game's rendering/audio load. Only accept the 18 FPS
   bar after checking the combined load; a failed spike is deleted, not tuned.
@@ -110,6 +110,19 @@ tab, 10 attempts each.
 
 Report back after each gate with the actual numbers (drift°, fps,
 catch mode picked, dim%) — that's what decides the next step.
+
+## Review fixes — 2026-10-04
+
+- First camera grant and camera reuse both run the missing-sensor guard.
+- Guidance meets the rectangular screen edge, including top and bottom in portrait.
+- The canvas uses CSS `mix-blend-mode: screen` to blend its glow with the video;
+  Canvas `lighter` still combines sprite particles internally. Verify the visual
+  result and FPS on both phones at Gate 1; this is not a measured result yet.
+- Camera onboarding explains turning, tilting, and the active catch mode.
+- Share fallback is labelled Copy link, with visible copy failure and a manual link.
+- Fairy appearance, reticle geometry, audio, dwell decay, and sensor/frame timing
+  are configurable in the single `CONFIG` object.
+- Feature work is frozen pending physical-phone gates. Record Gate 1 in `STATUS.md`.
 
 ## Local checks
 

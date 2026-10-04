@@ -174,3 +174,23 @@ Do this on a real phone, with the game running, editing only `CONFIG`:
 4. `fadeStartAngle`/`fadeEndAngle` — does it materialize, or pop?
 5. `edgeGlowMaxOpacity` — test at 0 first; is it needed at all?
 6. `driftRate` — only after everything above is settled
+
+
+## Rendering and feedback controls
+
+The implementation also keeps these starting values in its single `CONFIG`:
+
+- `dwellDecayRate: 2` — seconds of progress removed per second outside the catch zone.
+- `edgeGlowRadiusFraction: 0.45` — glow radius relative to the shorter screen dimension.
+- Audio: `audioBaseFrequency: 220`, `audioFrequencyRange: 300` (Hz),
+  `audioMaxGain: 0.05`, `audioResponseSeconds: 0.05`.
+- `fairy`: core radius 18px, glow radius scale 3, gradient stops and colors,
+  8 particles, orbit radius scale 1.8, orbit speed 2 radians/second,
+  particle radius 2.5px, and particle color.
+- `reticle`: ring radius 10px, arm bounds 6–16px, line width 2px,
+  progress radius 20px, progress line width 3px.
+- Timing: `sensorTimeoutMs: 1500`, `maxFrameSeconds: 0.1`, `fpsSampleMs: 500`.
+
+CSS screen blending combines the glow canvas with the camera element. Verify
+its appearance and performance on both phones; Canvas `lighter` alone only
+combines pixels inside the overlay.
